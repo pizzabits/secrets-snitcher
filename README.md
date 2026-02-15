@@ -26,6 +26,8 @@ Watches which pods read secret files, how often, and whether they cache values i
 4. **Rolling window aggregator** tracks per-pod read frequency over 60 seconds, resolves pod names via `/proc/{pid}/environ`
 5. **HTTP API** on port 9100 serves the current state as JSON
 
+![Demo](snitch-video.mov)  
+
 ### What it watches
 
 | Mount path | Source |
