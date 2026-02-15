@@ -1,0 +1,334 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: secrets-snitcher-code
+  namespace: secrets-snitcher
+data:
+  api.py: |
+    """Minimal secrets-snitcher API — runs eBPF probe inline."""
+    import ctypes
+    import json
+    import os
+    import sys
+    import threading
+    import time
+    from collections import defaultdict
+    from datetime import datetime, timezone
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    # --- Aggregator ---
+    WINDOW = 10
+    _lock = threading.Lock()
+    _accesses = defaultdict(lambda: {"count": 0, "last": 0, "comm": ""})
+
+    def record_access(pid, comm, filepath, timestamp):
+        key = (pid, filepath)
+        with _lock:
+            _accesses[key]["count"] += 1
+            _accesses[key]["last"] = time.time()
+            _accesses[key]["comm"] = comm
+
+    def get_summary():
+        now = time.time()
+        results = []
+        with _lock:
+            for (pid, path), data in list(_accesses.items()):
+                age = now - data["last"]
+                if age > WINDOW:
+                    del _accesses[(pid, path)]
+                    continue
+                rps = data["count"] / min(age + 0.1, WINDOW)
+                # Resolve pod name from /proc
+                pod = _resolve_pod(pid)
+                results.append({
+                    "pod": pod,
+                    "container": data["comm"],
+                    "secret_path": path,
+                    "reads_per_sec": round(rps, 1),
+                    "last_read": datetime.fromtimestamp(data["last"], tz=timezone.utc).isoformat(),
+                    "cached": rps < 1,
+                })
+        return results
+
+    def _resolve_pod(pid):
+        try:
+            with open(f"/host-proc/{pid}/environ", "rb") as f:
+                env = f.read()
+            for part in env.split(b"\x00"):
+                if part.startswith(b"HOSTNAME="):
+                    return part.split(b"=", 1)[1].decode()
+        except Exception:
+            pass
+        return f"pid-{pid}"
+
+    # --- BPF ---
+    BPF_PROGRAM = r"""
+    #include <uapi/linux/ptrace.h>
+    #include <linux/sched.h>
+    struct event_t {
+        u32 pid;
+        char comm[16];
+        char filename[256];
+        u64 timestamp;
+    };
+    BPF_PERF_OUTPUT(events);
+
+    static inline bool is_secret_path(const char *path) {
+        char buf[20];
+        bpf_probe_read_user_str(buf, sizeof(buf), path);
+
+        // /var/run/secrets/ (K8s service account tokens)
+        if (buf[0]=='/' && buf[1]=='v' && buf[2]=='a' && buf[3]=='r' &&
+            buf[4]=='/' && buf[5]=='r' && buf[6]=='u' && buf[7]=='n' &&
+            buf[8]=='/' && buf[9]=='s' && buf[10]=='e' && buf[11]=='c' &&
+            buf[12]=='r' && buf[13]=='e' && buf[14]=='t' && buf[15]=='s' &&
+            buf[16]=='/')
+            return true;
+
+        // /var/secrets/
+        if (buf[0]=='/' && buf[1]=='v' && buf[2]=='a' && buf[3]=='r' &&
+            buf[4]=='/' && buf[5]=='s' && buf[6]=='e' && buf[7]=='c' &&
+            buf[8]=='r' && buf[9]=='e' && buf[10]=='t' && buf[11]=='s' &&
+            buf[12]=='/')
+            return true;
+
+        // /mnt/secrets-store/
+        if (buf[0]=='/' && buf[1]=='m' && buf[2]=='n' && buf[3]=='t' &&
+            buf[4]=='/' && buf[5]=='s' && buf[6]=='e' && buf[7]=='c')
+            return true;
+
+        // /run/secrets/
+        if (buf[0]=='/' && buf[1]=='r' && buf[2]=='u' && buf[3]=='n' &&
+            buf[4]=='/' && buf[5]=='s' && buf[6]=='e' && buf[7]=='c' &&
+            buf[8]=='r' && buf[9]=='e' && buf[10]=='t' && buf[11]=='s' &&
+            buf[12]=='/')
+            return true;
+
+        return false;
+    }
+
+    TRACEPOINT_PROBE(syscalls, sys_enter_openat) {
+        const char *fname = args->filename;
+        if (!is_secret_path(fname))
+            return 0;
+        struct event_t evt = {};
+        evt.pid = bpf_get_current_pid_tgid() >> 32;
+        bpf_get_current_comm(&evt.comm, sizeof(evt.comm));
+        bpf_probe_read_user_str(evt.filename, sizeof(evt.filename), fname);
+        evt.timestamp = bpf_ktime_get_ns();
+        events.perf_submit(args, &evt, sizeof(evt));
+        return 0;
+    }
+    """
+
+    class Event(ctypes.Structure):
+        _fields_ = [
+            ("pid", ctypes.c_uint32),
+            ("comm", ctypes.c_char * 16),
+            ("filename", ctypes.c_char * 256),
+            ("timestamp", ctypes.c_uint64),
+        ]
+
+    def handle_event(cpu, data, size):
+        event = ctypes.cast(data, ctypes.POINTER(Event)).contents
+        record_access(
+            pid=event.pid,
+            comm=event.comm.decode("utf-8", errors="replace").rstrip("\x00"),
+            filepath=event.filename.decode("utf-8", errors="replace").rstrip("\x00"),
+            timestamp=event.timestamp,
+        )
+
+    # --- HTTP ---
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/api/v1/secret-access":
+                body = json.dumps({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "observation_window_seconds": WINDOW,
+                    "entries": get_summary(),
+                }, indent=2).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == "/healthz":
+                body = json.dumps({"status": "ok", "ebpf_attached": bpf is not None}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_error(404)
+        def log_message(self, fmt, *args):
+            print(f"[api] {args[0]}", file=sys.stderr)
+
+    # --- Main ---
+    bpf = None
+    print("", file=sys.stderr)
+    print("  secrets-snitcher v0.1.0", file=sys.stderr)
+    print("  eBPF-powered Kubernetes secret access monitor", file=sys.stderr)
+    print("", file=sys.stderr)
+    try:
+        from bcc import BPF
+        print("[ebpf] Loading kernel probe:", file=sys.stderr)
+        print("", file=sys.stderr)
+        for line in BPF_PROGRAM.strip().splitlines():
+            print(f"  {line}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("[ebpf] Compiling BPF program...", file=sys.stderr)
+        bpf = BPF(text=BPF_PROGRAM)
+        bpf["events"].open_perf_buffer(handle_event)
+        print("[ebpf] BPF program loaded into kernel", file=sys.stderr)
+        print("[ebpf] Attached tracepoint: syscalls:sys_enter_openat", file=sys.stderr)
+        print("[ebpf] Perf buffer open — streaming events", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("[watch] /var/run/secrets/**", file=sys.stderr)
+        print("[watch] /mnt/secrets-store/**", file=sys.stderr)
+        print("[watch] /run/secrets/**", file=sys.stderr)
+        print("", file=sys.stderr)
+        def poll():
+            while True:
+                bpf.perf_buffer_poll(timeout=100)
+        t = threading.Thread(target=poll, daemon=True)
+        t.start()
+    except Exception as e:
+        print(f"[ebpf] Not available: {e}", file=sys.stderr)
+    print("[api] Listening on :9100", file=sys.stderr)
+    print("[ready] Watching for secret access...", file=sys.stderr)
+    HTTPServer(("0.0.0.0", 9100), Handler).serve_forever()
+  live.py: |
+    """Live-updating secret access monitor."""
+    import json, sys, time, urllib.request
+    from datetime import datetime, timezone
+
+    B = "\033[1m"
+    R = "\033[91m"
+    G = "\033[92m"
+    Y = "\033[93m"
+    D = "\033[2m"
+    X = "\033[0m"
+    CLEAR = "\033[2J\033[H"
+
+    prev_pods = set()
+
+    while True:
+        try:
+            data = json.loads(urllib.request.urlopen("http://localhost:9100/api/v1/secret-access").read())
+        except Exception:
+            time.sleep(2)
+            continue
+
+        entries = data.get("entries", [])
+        entries.sort(key=lambda x: x["reads_per_sec"], reverse=True)
+        now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+
+        sys.stdout.write(CLEAR)
+
+        print(f"  {B}secrets-snitcher{X} — eBPF kernel probe    {D}{now} UTC{X}")
+        print()
+        print(f"  {D}TRACEPOINT_PROBE(syscalls, sys_enter_openat) {{{X}")
+        print(f"  {D}    if (!is_secret_path(fname)) return 0;{X}")
+        print(f"  {D}    evt.pid = bpf_get_current_pid_tgid() >> 32;{X}")
+        print(f"  {D}    events.perf_submit(args, &evt, sizeof(evt));{X}")
+        print(f"  {D}}}{X}")
+        print()
+
+        has_anomaly = any(not e["cached"] and e["reads_per_sec"] > 5 for e in entries)
+        if has_anomaly:
+            print(f"  {R}{B}! ANOMALY DETECTED{X}")
+        else:
+            print(f"  {G}All normal{X}")
+        print()
+
+        print(f"  {'POD':<30} {'SECRET':<12} {'READS/SEC':>10}  STATUS")
+        print(f"  {'─' * 30} {'─' * 12} {'─' * 10}  {'─' * 12}")
+
+        curr_pods = set()
+        for e in entries:
+            pod = e["pod"]
+            curr_pods.add(pod)
+            if len(pod) > 30:
+                pod = pod[:27] + "..."
+            secret = e["secret_path"].split("/")[-1]
+            rps = e["reads_per_sec"]
+            new = pod.strip(".") not in {p[:27] for p in prev_pods} and len(prev_pods) > 0
+            if not e["cached"] and rps > 5:
+                rps_str = f"{R}{rps:>10.1f}{X}"
+                status = f"{R}NOT CACHED{X}"
+            elif not e["cached"]:
+                rps_str = f"{rps:>10.1f}"
+                status = "not cached"
+            else:
+                rps_str = f"{G}{rps:>10.1f}{X}"
+                status = f"{G}cached{X}"
+            tag = f"  {Y}<< NEW{X}" if new else ""
+            print(f"  {pod:<30} {secret:<12} {rps_str}  {status}{tag}")
+
+        print()
+        print(f"  {D}watching: /var/run/secrets/** /mnt/secrets-store/** /run/secrets/**{X}")
+        print(f"  {D}window: {data['observation_window_seconds']}s | refreshing every 2s | ctrl-c to exit{X}")
+        sys.stdout.flush()
+
+        prev_pods = curr_pods
+        time.sleep(2)
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secrets-snitcher
+  namespace: secrets-snitcher
+  labels:
+    app: secrets-snitcher
+spec:
+  serviceAccountName: secrets-snitcher
+  hostPID: true
+  containers:
+    - name: snitcher
+      image: ubuntu:22.04
+      command:
+        - /bin/bash
+        - -c
+        - |
+          apt-get update -qq && apt-get install -y -qq python3 python3-pip bpfcc-tools python3-bpfcc linux-headers-$(uname -r) > /dev/null 2>&1
+          echo "[install] Dependencies ready"
+          python3 /code/api.py
+      ports:
+        - containerPort: 9100
+          name: http
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: code
+          mountPath: /code
+        - name: host-proc
+          mountPath: /host-proc
+          readOnly: true
+        - name: debugfs
+          mountPath: /sys/kernel/debug
+      resources:
+        limits:
+          cpu: 200m
+          memory: 256Mi
+  volumes:
+    - name: code
+      configMap:
+        name: secrets-snitcher-code
+    - name: host-proc
+      hostPath:
+        path: /proc
+    - name: debugfs
+      hostPath:
+        path: /sys/kernel/debug
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: secrets-snitcher
+  namespace: secrets-snitcher
+spec:
+  selector:
+    app: secrets-snitcher
+  ports:
+    - port: 9100
+      targetPort: 9100
+  type: ClusterIP

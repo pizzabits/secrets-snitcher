@@ -1,0 +1,39 @@
+# WARNING: This is a deliberately suspicious pod for testing secrets-snitcher.
+# It simulates a compromised workload that continuously reads service account tokens.
+# DO NOT deploy this in production clusters.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: totally-legit-app
+  namespace: default
+  labels:
+    app: totally-legit-app
+    purpose: secrets-snitcher-demo
+  annotations:
+    description: "Nothing to see here. Just a normal app doing normal things."
+spec:
+  containers:
+    - name: definitely-not-mining
+      image: python:3.11-slim
+      command:
+        - python3
+        - -c
+        - |
+          import time, os
+          print("Starting totally legitimate business logic...", flush=True)
+          while True:
+              fd = os.open("/var/run/secrets/kubernetes.io/serviceaccount/token", os.O_RDONLY)
+              os.close(fd)
+              fd = os.open("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt", os.O_RDONLY)
+              os.close(fd)
+              fd = os.open("/var/run/secrets/kubernetes.io/serviceaccount/namespace", os.O_RDONLY)
+              os.close(fd)
+              time.sleep(0.085)
+      resources:
+        limits:
+          cpu: 50m
+          memory: 32Mi
+        requests:
+          cpu: 10m
+          memory: 16Mi
+  restartPolicy: Always

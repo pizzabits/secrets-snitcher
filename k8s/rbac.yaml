@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secrets-snitcher
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: secrets-snitcher
+  namespace: secrets-snitcher
