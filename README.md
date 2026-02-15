@@ -157,11 +157,14 @@ pytest tests/ -v
 
 Requires Linux nodes with kernel headers and BCC support:
 
-- **AKS** — works (Ubuntu node images have kernel headers)
-- **EKS** — works (Amazon Linux 2 / Ubuntu AMIs)
-- **GKE** — Ubuntu node images only. COS (Container-Optimized OS) nodes do not include kernel headers and are not supported by BCC
-- **Bare metal, k3s, kubeadm** — works if kernel headers are installed
-- **kind, minikube** — works for local testing
+| Platform | Status | Notes |
+|---|---|---|
+| **AKS** | Works | Ubuntu node images have kernel headers |
+| **EKS** | Works | Amazon Linux 2 / Ubuntu AMIs |
+| **GKE** | Partial | Ubuntu node images only. COS nodes lack kernel headers |
+| **K3s** | [Tested](k3s/) | Ubuntu 24.04 + kernel 6.x verified. See [platform guide](k3s/) |
+| **Bare metal / kubeadm** | Works | If kernel headers are installed |
+| **kind / minikube** | Works | For local testing |
 
 Requires privileged containers (`CAP_BPF` + `CAP_SYS_ADMIN` + `hostPID: true`).
 
@@ -175,6 +178,8 @@ k8s/pod-inline.yaml
 ├── Pod (privileged, hostPID: true)
 │   ├── mounts /proc as /host-proc (read-only, for pod name resolution)
 │   ├── mounts /sys/kernel/debug (required by BCC)
+│   ├── mounts /lib/modules (read-only, kernel module symbols)
+│   ├── mounts /usr/src (read-only, kernel headers for BPF compilation)
 │   └── installs python3 + BCC at startup from ubuntu:22.04
 └── Service (ClusterIP :9100)
 ```
@@ -182,6 +187,23 @@ k8s/pod-inline.yaml
 Everything ships as a single YAML file. No Docker build. The Python code lives in a ConfigMap, the pod installs BCC at startup from the ubuntu base image, and the BPF program compiles in-place on the node using the node's own kernel headers.
 
 **Why BCC instead of libbpf/CO-RE:** BCC compiles the BPF C at runtime using Clang, which means it works on any kernel version without pre-compiled bytecode. The tradeoff is startup time (~30s for apt-get + compile) and requiring kernel headers on the node. A production hardened version would use libbpf with CO-RE for faster startup and smaller footprint.
+
+## Platform guides
+
+| Platform | Guide |
+|---|---|
+| K3s | [k3s/README.md](k3s/) — tested on Ubuntu 24.04 + kernel 6.x, includes verified output |
+
+More platforms coming. If you've tested on a platform not listed here, open a PR with a guide under `<platform>/README.md`.
+
+## Contributing
+
+PRs welcome. Before submitting:
+
+1. **Run tests:** `pytest tests/ -v` — all must pass
+2. **Test on a real cluster** if your change touches `k8s/` manifests or the BPF program. The BPF C compiles at runtime on the node, so YAML-level correctness isn't enough.
+3. **One concern per PR.** Don't bundle unrelated changes.
+4. **Platform guides** go in `<platform>/README.md` with: prerequisites, deploy steps, verified output showing real data, and known issues.
 
 ## Limitations
 
@@ -195,4 +217,4 @@ This is a weekend project / proof of concept, not production-hardened. Known gap
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) — Copyright (c) 2026 Michael Ridner
