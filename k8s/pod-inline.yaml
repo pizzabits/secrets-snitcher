@@ -5,7 +5,11 @@ metadata:
   namespace: secrets-snitcher
 data:
   api.py: |
-    """Minimal secrets-snitcher API — runs eBPF probe inline."""
+    """secrets-snitcher — eBPF-powered Kubernetes secret access monitor.
+
+    Copyright (c) 2026 Michael Ridner. All rights reserved.
+    Licensed under the MIT License. See LICENSE file in the project root.
+    """
     import ctypes
     import json
     import os
@@ -165,8 +169,9 @@ data:
     # --- Main ---
     bpf = None
     print("", file=sys.stderr)
-    print("  secrets-snitcher v0.1.0", file=sys.stderr)
+    print("  secrets-snitcher v0.2.0", file=sys.stderr)
     print("  eBPF-powered Kubernetes secret access monitor", file=sys.stderr)
+    print("  By Michael Ridner — MIT License", file=sys.stderr)
     print("", file=sys.stderr)
     try:
         from bcc import BPF
@@ -289,7 +294,9 @@ spec:
         - /bin/bash
         - -c
         - |
-          apt-get update -qq && apt-get install -y -qq python3 python3-pip bpfcc-tools python3-bpfcc linux-headers-$(uname -r) > /dev/null 2>&1
+          apt-get update -qq
+          apt-get install -y -qq python3 python3-bpfcc bpfcc-tools > /dev/null 2>&1
+          apt-get install -y -qq linux-headers-$(uname -r) > /dev/null 2>&1 || true
           echo "[install] Dependencies ready"
           python3 /code/api.py
       ports:
@@ -305,6 +312,12 @@ spec:
           readOnly: true
         - name: debugfs
           mountPath: /sys/kernel/debug
+        - name: modules
+          mountPath: /lib/modules
+          readOnly: true
+        - name: usr-src
+          mountPath: /usr/src
+          readOnly: true
       resources:
         limits:
           cpu: 200m
@@ -319,6 +332,12 @@ spec:
     - name: debugfs
       hostPath:
         path: /sys/kernel/debug
+    - name: modules
+      hostPath:
+        path: /lib/modules
+    - name: usr-src
+      hostPath:
+        path: /usr/src
 ---
 apiVersion: v1
 kind: Service
