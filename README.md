@@ -135,6 +135,30 @@ Returns all secret file access observed in the rolling window.
 }
 ```
 
+## Terminal UI (TUI)
+
+A live dashboard for watching secret access in real time. Built with Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea).
+
+<!-- TODO: replace with your demo gif -->
+<!-- ![TUI Demo](demo/tui-demo.gif) -->
+
+```bash
+# Build
+make tui
+
+# Run (with port-forward active)
+./secrets-snitcher-tui --api http://localhost:9100
+
+# Or try with the mock API for a quick demo
+make mock-api            # Terminal 1
+curl localhost:9100/toggle  # Terminal 2
+./secrets-snitcher-tui      # Terminal 3
+```
+
+Features: anomaly detection banner, color-coded read rates, NEW pod badges, vim-style navigation, search, sortable columns, resizable layout.
+
+See [cmd/tui/README.md](cmd/tui/README.md) for full keyboard shortcuts and options, and [cmd/tui/DEVGUIDE.md](cmd/tui/DEVGUIDE.md) for an architecture walkthrough aimed at C/C++ developers.
+
 ## Makefile targets
 
 ```bash
@@ -144,6 +168,8 @@ make demo       # deploy a suspicious test pod
 make demo-clean # remove the test pod
 make logs       # tail the snitcher logs
 make test       # pytest tests/ -v
+make tui        # build the terminal UI binary
+make mock-api   # run the mock API for TUI development
 ```
 
 ## Running tests

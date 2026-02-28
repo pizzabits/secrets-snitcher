@@ -18,6 +18,17 @@ func main() {
 		Short: "Terminal UI for secrets-snitcher",
 		Long:  "Interactive terminal dashboard for monitoring Kubernetes secret access detected by secrets-snitcher's eBPF probe.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Save original terminal bg, set ours, restore on exit
+			origBg := queryTerminalBg()
+			setTerminalBg("#0f1117")
+			defer func() {
+				if origBg != "" {
+					setTerminalBg(origBg)
+				} else {
+					resetTerminalBg()
+				}
+			}()
+
 			m := initialModel(apiURL, interval)
 			p := tea.NewProgram(m, tea.WithAltScreen())
 			_, err := p.Run()

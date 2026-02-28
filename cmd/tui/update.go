@@ -9,47 +9,48 @@ import (
 )
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Always handle window size and phase transitions
 	switch msg := msg.(type) {
-
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		return m, nil
+	case splashDoneMsg:
+		m.phase = phaseDashboard
+		return m, nil
+	case goodbyeDoneMsg:
+		return m, tea.Quit
+	}
 
+	// During splash, only q/ctrl+c can exit, skip everything else
+	if m.phase == phaseSplash {
+		if msg, ok := msg.(tea.KeyMsg); ok {
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			default:
+				m.phase = phaseDashboard
+				return m, nil
+			}
+		}
+		// Still process data in background during splash
+		return m.handleDataMsg(msg)
+	}
+
+	// During goodbye, ignore all input
+	if m.phase == phaseGoodbye {
+		return m, nil
+	}
+
+	// Dashboard phase
+	switch msg := msg.(type) {
 	case tickMsg:
 		return m, tea.Batch(
 			fetchData(m.client),
 			tickCmd(m.interval),
 		)
-
 	case dataMsg:
-		if msg.err != nil {
-			m.err = msg.err
-			m.connected = false
-			return m, nil
-		}
-		m.err = nil
-		m.connected = true
-		m.lastRefresh = time.Now()
-
-		// detect new pods
-		currentPods := make(map[string]bool)
-		m.newPods = make(map[string]bool)
-		for _, e := range msg.response.Entries {
-			currentPods[e.Pod] = true
-			if !m.prevPods[e.Pod] {
-				m.newPods[e.Pod] = true
-			}
-		}
-		m.prevPods = currentPods
-		m.entries = msg.response.Entries
-		m.sortEntries()
-
-		if m.cursor >= len(m.entries) && len(m.entries) > 0 {
-			m.cursor = len(m.entries) - 1
-		}
-		return m, nil
-
+		return m.handleDataUpdate(msg)
 	case tea.KeyMsg:
 		if m.searching {
 			return m.handleSearchKey(msg)
@@ -60,10 +61,59 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleDataMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tickMsg:
+		return m, tea.Batch(
+			fetchData(m.client),
+			tickCmd(m.interval),
+		)
+	case dataMsg:
+		return m.handleDataUpdate(msg)
+	}
+	return m, nil
+}
+
+func (m model) handleDataUpdate(msg dataMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.err = msg.err
+		m.connected = false
+		return m, nil
+	}
+	m.err = nil
+	m.connected = true
+	m.lastRefresh = time.Now()
+
+	// detect new pods (track first-seen time, show NEW for 30s)
+	now := time.Now()
+	currentPods := make(map[string]bool)
+	for _, e := range msg.response.Entries {
+		currentPods[e.Pod] = true
+		if !m.prevPods[e.Pod] {
+			m.podFirstSeen[e.Pod] = now
+		}
+	}
+	// clean up pods that disappeared
+	for pod := range m.podFirstSeen {
+		if !currentPods[pod] {
+			delete(m.podFirstSeen, pod)
+		}
+	}
+	m.prevPods = currentPods
+	m.entries = msg.response.Entries
+	m.sortEntries()
+
+	if m.cursor >= len(m.entries) && len(m.entries) > 0 {
+		m.cursor = len(m.entries) - 1
+	}
+	return m, nil
+}
+
 func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
-		return m, tea.Quit
+		m.phase = phaseGoodbye
+		return m, goodbyeTimer()
 	case "j", "down":
 		if m.cursor < len(m.filteredEntries())-1 {
 			m.cursor++
@@ -89,6 +139,14 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "S":
 		m.sortAsc = !m.sortAsc
 		m.sortEntries()
+	case "<", "left":
+		if m.colRatio > 20 {
+			m.colRatio -= 5
+		}
+	case ">", "right":
+		if m.colRatio < 80 {
+			m.colRatio += 5
+		}
 	case "esc":
 		m.search = ""
 		m.cursor = 0
