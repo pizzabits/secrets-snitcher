@@ -15,7 +15,7 @@ func queryTerminalBg() string {
 	fd := int(os.Stdin.Fd())
 
 	// Save current terminal state and switch to raw mode for reading the response
-	orig, err := unix.IoctlGetTermios(fd, unix.TIOCGETA)
+	orig, err := unix.IoctlGetTermios(fd, ioctlGetTermios)
 	if err != nil {
 		return ""
 	}
@@ -24,10 +24,10 @@ func queryTerminalBg() string {
 	raw.Lflag &^= unix.ECHO | unix.ICANON
 	raw.Cc[unix.VMIN] = 0
 	raw.Cc[unix.VTIME] = 1 // 100ms timeout in deciseconds
-	if err := unix.IoctlSetTermios(fd, unix.TIOCSETA, &raw); err != nil {
+	if err := unix.IoctlSetTermios(fd, ioctlSetTermios, &raw); err != nil {
 		return ""
 	}
-	defer unix.IoctlSetTermios(fd, unix.TIOCSETA, orig)
+	defer unix.IoctlSetTermios(fd, ioctlSetTermios, orig)
 
 	// Send OSC 11 query
 	fmt.Print("\033]11;?\033\\")
