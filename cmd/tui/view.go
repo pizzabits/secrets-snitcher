@@ -191,7 +191,7 @@ func stripAnsi(s string) string {
 		if s[i] == '\033' && i+1 < len(s) && s[i+1] == '[' {
 			// CSI sequence: skip until letter
 			j := i + 2
-			for j < len(s) && !((s[j] >= 'A' && s[j] <= 'Z') || (s[j] >= 'a' && s[j] <= 'z')) {
+			for j < len(s) && (s[j] < 'A' || s[j] > 'Z') && (s[j] < 'a' || s[j] > 'z') {
 				j++
 			}
 			if j < len(s) {

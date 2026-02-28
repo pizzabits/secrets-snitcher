@@ -27,7 +27,7 @@ func queryTerminalBg() string {
 	if err := unix.IoctlSetTermios(fd, ioctlSetTermios, &raw); err != nil {
 		return ""
 	}
-	defer unix.IoctlSetTermios(fd, ioctlSetTermios, orig)
+	defer func() { _ = unix.IoctlSetTermios(fd, ioctlSetTermios, orig) }()
 
 	// Send OSC 11 query
 	fmt.Print("\033]11;?\033\\")

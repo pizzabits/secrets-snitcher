@@ -16,10 +16,10 @@ func TestSetTerminalBgOutput(t *testing.T) {
 	setTerminalBg("#0f1117")
 
 	os.Stdout = old
-	w.Close()
+	_ = w.Close()
 
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	got := buf.String()
 
 	want := "\033]11;#0f1117\007"
@@ -36,10 +36,10 @@ func TestResetTerminalBgOutput(t *testing.T) {
 	resetTerminalBg()
 
 	os.Stdout = old
-	w.Close()
+	_ = w.Close()
 
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	got := buf.String()
 
 	want := "\033]111\007"
@@ -49,7 +49,6 @@ func TestResetTerminalBgOutput(t *testing.T) {
 }
 
 func TestSetTerminalBgRestoresOriginal(t *testing.T) {
-	// Simulate: if we captured "rgb:ffff/ffff/dddd", restore should emit that exact color
 	r, w, _ := os.Pipe()
 	old := os.Stdout
 	os.Stdout = w
@@ -58,10 +57,10 @@ func TestSetTerminalBgRestoresOriginal(t *testing.T) {
 	setTerminalBg(origBg)
 
 	os.Stdout = old
-	w.Close()
+	_ = w.Close()
 
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	got := buf.String()
 
 	if !strings.Contains(got, origBg) {
@@ -70,7 +69,6 @@ func TestSetTerminalBgRestoresOriginal(t *testing.T) {
 }
 
 func TestQueryTerminalBgNonTerminal(t *testing.T) {
-	// When stdin is not a terminal (e.g. in CI), query should return empty gracefully
 	result := queryTerminalBg()
 	if result != "" {
 		t.Logf("queryTerminalBg returned %q (running in a real terminal)", result)
