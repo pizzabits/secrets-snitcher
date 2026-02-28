@@ -26,7 +26,9 @@ Watches which pods read secret files, how often, and whether they cache values i
 4. **Rolling window aggregator** tracks per-pod read frequency over 60 seconds, resolves pod names via `/proc/{pid}/environ`
 5. **HTTP API** on port 9100 serves the current state as JSON
 
-![Demo](/demo/demo.gif)  
+![Demo](/demo/demo.gif)
+
+![TUI Dashboard](/demo/tui-demo.gif)
 
 ### What it watches
 
@@ -138,9 +140,6 @@ Returns all secret file access observed in the rolling window.
 ## Terminal UI (TUI)
 
 A live dashboard for watching secret access in real time. Built with Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea).
-
-<!-- TODO: replace with your demo gif -->
-<!-- ![TUI Demo](demo/tui-demo.gif) -->
 
 ```bash
 # Build
