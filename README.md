@@ -6,6 +6,8 @@ eBPF-powered Kubernetes secret access monitor.
 
 Watches which pods read secret files, how often, and whether they cache values in memory or re-read from disk on every request. Catches suspicious access patterns like a compromised pod hammering service account tokens.
 
+> **NEW** - [Interactive TUI dashboard](#terminal-ui-tui) for live secret access monitoring with anomaly detection, color-coded read rates, and vim-style navigation.
+
 ## How it works
 
 ```
@@ -20,15 +22,13 @@ Watches which pods read secret files, how often, and whether they cache values i
 
 ~50 lines of BPF C sit inside the kernel, filtering at the syscall level before anything reaches userspace. Zero overhead for non-secret file access.
 
-1. **eBPF tracepoint** hooks `sys_enter_openat` — the syscall every file open goes through
+1. **eBPF tracepoint** hooks `sys_enter_openat` -the syscall every file open goes through
 2. **Kernel-side path filter** checks if the filename starts with a known secret mount path. Non-matching opens are dropped inside the kernel, never copied to userspace
 3. **Perf buffer** streams matching events (pid, process name, filename, timestamp) to the Python aggregator
 4. **Rolling window aggregator** tracks per-pod read frequency over 60 seconds, resolves pod names via `/proc/{pid}/environ`
 5. **HTTP API** on port 9100 serves the current state as JSON
 
 ![Demo](/demo/demo.gif)
-
-![TUI Dashboard](/demo/tui-demo.gif)
 
 ### What it watches
 
@@ -41,7 +41,7 @@ Watches which pods read secret files, how often, and whether they cache values i
 
 ### The `cached` field
 
-A service with `reads_per_sec >= 1` is actively opening the secret file on every request — **not cached**. If you rotate or delete that secret, the service will immediately see the change (or break). A service with `reads_per_sec < 1` has likely read the secret once and cached the value in memory. Nothing in Kubernetes tells you which behavior you're dealing with. This tool does.
+A service with `reads_per_sec >= 1` is actively opening the secret file on every request -**not cached**. If you rotate or delete that secret, the service will immediately see the change (or break). A service with `reads_per_sec < 1` has likely read the secret once and cached the value in memory. Nothing in Kubernetes tells you which behavior you're dealing with. This tool does.
 
 ## Quick start
 
@@ -141,6 +141,8 @@ Returns all secret file access observed in the rolling window.
 
 A live dashboard for watching secret access in real time. Built with Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
+![TUI Dashboard](/demo/tui-demo.gif)
+
 ```bash
 # Build
 make tui
@@ -217,7 +219,7 @@ Everything ships as a single YAML file. No Docker build. The Python code lives i
 
 | Platform | Guide |
 |---|---|
-| K3s | [k3s/README.md](k3s/) — tested on Ubuntu 24.04 + kernel 6.x, includes verified output |
+| K3s | [k3s/README.md](k3s/) -tested on Ubuntu 24.04 + kernel 6.x, includes verified output |
 
 More platforms coming. If you've tested on a platform not listed here, open a PR with a guide under `<platform>/README.md`.
 
@@ -225,7 +227,7 @@ More platforms coming. If you've tested on a platform not listed here, open a PR
 
 PRs welcome. Before submitting:
 
-1. **Run tests:** `pytest tests/ -v` — all must pass
+1. **Run tests:** `pytest tests/ -v` -all must pass
 2. **Test on a real cluster** if your change touches `k8s/` manifests or the BPF program. The BPF C compiles at runtime on the node, so YAML-level correctness isn't enough.
 3. **One concern per PR.** Don't bundle unrelated changes.
 4. **Platform guides** go in `<platform>/README.md` with: prerequisites, deploy steps, verified output showing real data, and known issues.
@@ -240,6 +242,29 @@ This is a weekend project / proof of concept, not production-hardened. Known gap
 - Rolling window is in-memory only (no cross-node aggregation)
 - Pod name resolution reads `/proc` which may not work in all container runtimes
 
+## Changelog
+
+### v0.3.0 - Interactive TUI dashboard
+- Bubble Tea TUI with live-updating dashboard, anomaly detection, NEW pod badges
+- Raccoon splash and goodbye screens
+- Vim-style navigation, search, sortable columns, resizable layout
+- Terminal background detection and restore via OSC 11
+- Mock API for demo and development without a live cluster
+- 39 tests, 75% coverage
+- DEVGUIDE.md for C/C++ developers learning Go
+
+### v0.2.0 - K3s platform support
+- Tested and verified on K3s (Ubuntu 24.04, kernel 6.x)
+- Platform guide with prerequisites and verified output
+
+### v0.1.0 - Initial release
+- eBPF tracepoint on `sys_enter_openat` for secret file access detection
+- Python aggregator with 60-second rolling window
+- HTTP API on port 9100 (`/api/v1/secret-access`, `/healthz`)
+- Pod name resolution via `/proc/{pid}/environ`
+- Demo with malicious pod for testing
+- Single YAML deployment (no Docker build required)
+
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2026 Michael Ridner
+[MIT](LICENSE) - Copyright (c) 2026 Michael Ridner
