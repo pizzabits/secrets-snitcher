@@ -22,7 +22,7 @@ Watches which pods read secret files, how often, and whether they cache values i
 
 ~50 lines of BPF C sit inside the kernel, filtering at the syscall level before anything reaches userspace. Zero overhead for non-secret file access.
 
-1. **eBPF tracepoint** hooks `sys_enter_openat` -the syscall every file open goes through
+1. **eBPF tracepoint** hooks `sys_enter_openat` - the syscall every file open goes through
 2. **Kernel-side path filter** checks if the filename starts with a known secret mount path. Non-matching opens are dropped inside the kernel, never copied to userspace
 3. **Perf buffer** streams matching events (pid, process name, filename, timestamp) to the Python aggregator
 4. **Rolling window aggregator** tracks per-pod read frequency over 60 seconds, resolves pod names via `/proc/{pid}/environ`
@@ -41,7 +41,7 @@ Watches which pods read secret files, how often, and whether they cache values i
 
 ### The `cached` field
 
-A service with `reads_per_sec >= 1` is actively opening the secret file on every request -**not cached**. If you rotate or delete that secret, the service will immediately see the change (or break). A service with `reads_per_sec < 1` has likely read the secret once and cached the value in memory. Nothing in Kubernetes tells you which behavior you're dealing with. This tool does.
+A service with `reads_per_sec >= 1` is actively opening the secret file on every request - **not cached**. If you rotate or delete that secret, the service will immediately see the change (or break). A service with `reads_per_sec < 1` has likely read the secret once and cached the value in memory. Nothing in Kubernetes tells you which behavior you're dealing with. This tool does.
 
 ## Quick start
 
@@ -219,7 +219,7 @@ Everything ships as a single YAML file. No Docker build. The Python code lives i
 
 | Platform | Guide |
 |---|---|
-| K3s | [k3s/README.md](k3s/) -tested on Ubuntu 24.04 + kernel 6.x, includes verified output |
+| K3s | [k3s/README.md](k3s/) - tested on Ubuntu 24.04 + kernel 6.x, includes verified output |
 
 More platforms coming. If you've tested on a platform not listed here, open a PR with a guide under `<platform>/README.md`.
 
@@ -227,7 +227,7 @@ More platforms coming. If you've tested on a platform not listed here, open a PR
 
 PRs welcome. Before submitting:
 
-1. **Run tests:** `pytest tests/ -v` -all must pass
+1. **Run tests:** `pytest tests/ -v` - all must pass
 2. **Test on a real cluster** if your change touches `k8s/` manifests or the BPF program. The BPF C compiles at runtime on the node, so YAML-level correctness isn't enough.
 3. **One concern per PR.** Don't bundle unrelated changes.
 4. **Platform guides** go in `<platform>/README.md` with: prerequisites, deploy steps, verified output showing real data, and known issues.
