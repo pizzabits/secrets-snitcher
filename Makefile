@@ -1,4 +1,4 @@
-.PHONY: deploy undeploy demo demo-clean logs test
+.PHONY: deploy undeploy demo demo-clean logs test tui mock-api
 
 NAMESPACE = secrets-snitcher
 
@@ -29,3 +29,11 @@ logs:
 
 test:
 	pytest tests/ -v
+
+tui:
+	go build -o secrets-snitcher-tui ./cmd/tui/
+	@echo "Built: ./secrets-snitcher-tui"
+	@echo "Usage: ./secrets-snitcher-tui --api http://localhost:9100"
+
+mock-api:
+	python3 demo/mock-api.py
