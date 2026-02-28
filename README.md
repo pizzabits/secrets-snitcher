@@ -242,28 +242,6 @@ This is a weekend project / proof of concept, not production-hardened. Known gap
 - Rolling window is in-memory only (no cross-node aggregation)
 - Pod name resolution reads `/proc` which may not work in all container runtimes
 
-## Changelog
-
-### v0.3.0 - Interactive TUI dashboard
-- Bubble Tea TUI with live-updating dashboard, anomaly detection, NEW pod badges
-- Raccoon splash and goodbye screens
-- Vim-style navigation, search, sortable columns, resizable layout
-- Terminal background detection and restore via OSC 11
-- Mock API for demo and development without a live cluster
-- 39 tests, 75% coverage
-- DEVGUIDE.md for C/C++ developers learning Go
-
-### v0.2.0 - K3s platform support
-- Tested and verified on K3s (Ubuntu 24.04, kernel 6.x)
-- Platform guide with prerequisites and verified output
-
-### v0.1.0 - Initial release
-- eBPF tracepoint on `sys_enter_openat` for secret file access detection
-- Python aggregator with 60-second rolling window
-- HTTP API on port 9100 (`/api/v1/secret-access`, `/healthz`)
-- Pod name resolution via `/proc/{pid}/environ`
-- Demo with malicious pod for testing
-- Single YAML deployment (no Docker build required)
 
 ## License
 
