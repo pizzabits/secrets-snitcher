@@ -232,6 +232,35 @@ PRs welcome. Before submitting:
 3. **One concern per PR.** Don't bundle unrelated changes.
 4. **Platform guides** go in `<platform>/README.md` with: prerequisites, deploy steps, verified output showing real data, and known issues.
 
+## Telemetry
+
+secrets-snitcher sends a single anonymous ping when the probe starts (at most once per 24 hours). It reports: tool version, kernel version, CPU architecture, Python version, and whether it's running as a DaemonSet or standalone.
+
+No IP addresses, hostnames, secret paths, or cluster information is collected. To opt out: set `SECRETS_SNITCHER_NO_TELEMETRY=1`.
+
+### Why we collect this
+
+This is a solo open source project. Telemetry is the only way to know if anyone is actually using it, what kernels and platforms to support, and whether to keep investing time in it. Without it, the project is built blind.
+
+### What we send
+
+| Field | Example | Why |
+|-------|---------|-----|
+| tool | secrets-snitcher | Which tool sent the ping |
+| version | 0.2.0 | Know which versions are in the wild |
+| kernel | 6.17.0-1008-gcp | Know which kernel offsets to support |
+| arch | x86_64 | Know if ARM support matters |
+| python | 3.10.12 | Know minimum Python version to target |
+| deployment_type | pod / daemonset / standalone | Know how people deploy |
+| uptime_hours | 48 | Distinguish "tried once" from "running in prod" |
+| distinct_id | a1b2c3... (SHA-256 hash) | Count unique installs without identifying anyone |
+
+### How the install ID works
+
+To count unique installations without collecting identifiable information, secrets-snitcher reads your cluster's `kube-system` namespace UID (a UUID that Kubernetes assigns when the cluster is created). This is why `rbac.yaml` includes a ClusterRole with read access to the `kube-system` namespace - it's only used to generate the telemetry hash.
+
+The raw UID never leaves your cluster. It's hashed with SHA-256 before sending. The hash cannot be reversed. On standalone installs (no Kubernetes), `/etc/machine-id` is used instead.
+
 ## Limitations
 
 This is a weekend project / proof of concept, not production-hardened. Known gaps:
