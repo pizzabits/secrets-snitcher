@@ -31,7 +31,7 @@ data:
     _TELEMETRY_ID_FILE = "/tmp/secrets_snitcher_id"
     _TELEMETRY_DEDUP_SECONDS = 86400
     _TELEMETRY_TIMEOUT = 3
-    _VERSION = "0.2.0"
+    _VERSION = "0.4.0"
 
     def _get_install_id():
         """Return a SHA-256 hash of the most stable available identifier."""
@@ -168,8 +168,60 @@ data:
         t = threading.Thread(target=_do_send, daemon=True)
         t.start()
 
+    # --- Feature toggles ---
+    _METRICS_ENABLED = os.environ.get("SNITCHER_METRICS_ENABLED", "true").lower() != "false"
+    _DASHBOARD_ENABLED = os.environ.get("SNITCHER_DASHBOARD_ENABLED", "true").lower() != "false"
+
+    # --- Prometheus metrics ---
+    def _prom_escape(v):
+        return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+    def _format_metrics(entries, ebpf_attached, window_seconds):
+        lines = [
+            "# HELP snitcher_ebpf_attached Whether the eBPF probe is loaded in the kernel.",
+            "# TYPE snitcher_ebpf_attached gauge",
+            f"snitcher_ebpf_attached {1 if ebpf_attached else 0}",
+            "# HELP snitcher_observation_window_seconds Rolling observation window length.",
+            "# TYPE snitcher_observation_window_seconds gauge",
+            f"snitcher_observation_window_seconds {window_seconds}",
+            "# HELP snitcher_tracked_secrets Number of active pod/secret combinations being tracked.",
+            "# TYPE snitcher_tracked_secrets gauge",
+            f"snitcher_tracked_secrets {len(entries)}",
+            "# HELP snitcher_secret_reads_per_second Current read rate over the observation window.",
+            "# TYPE snitcher_secret_reads_per_second gauge",
+            "# HELP snitcher_secret_reads_total Reads observed in the current window.",
+            "# TYPE snitcher_secret_reads_total gauge",
+            "# HELP snitcher_secret_cached Whether the secret appears to be cached in memory.",
+            "# TYPE snitcher_secret_cached gauge",
+            "# HELP snitcher_secret_last_read_timestamp_seconds Unix timestamp of the most recent read.",
+            "# TYPE snitcher_secret_last_read_timestamp_seconds gauge",
+        ]
+        for e in entries:
+            labels = (
+                f'{{pod="{_prom_escape(e["pod"])}",'
+                f'container="{_prom_escape(e["container"])}",'
+                f'secret_path="{_prom_escape(e["secret_path"])}"}}'
+            )
+            lines.append(f"snitcher_secret_reads_per_second{labels} {e['reads_per_sec']}")
+            lines.append(f"snitcher_secret_reads_total{labels} {e.get('read_count', 0)}")
+            lines.append(f"snitcher_secret_cached{labels} {1 if e['cached'] else 0}")
+            last_str = e["last_read"].replace("Z", "+00:00")
+            last_ts = datetime.fromisoformat(last_str).timestamp()
+            lines.append(f"snitcher_secret_last_read_timestamp_seconds{labels} {last_ts:.3f}")
+        lines.append("")
+        return "\n".join(lines)
+
+    # --- Dashboard ---
+    _DASHBOARD_HTML = None
+    if _DASHBOARD_ENABLED:
+        try:
+            with open("/code/dashboard.html", "rb") as f:
+                _DASHBOARD_HTML = f.read()
+        except Exception:
+            pass
+
     # --- Aggregator ---
-    WINDOW = 10
+    WINDOW = 60
     _lock = threading.Lock()
     _accesses = defaultdict(lambda: {"count": 0, "last": 0, "comm": ""})
 
@@ -196,6 +248,7 @@ data:
                     "pod": pod,
                     "container": data["comm"],
                     "secret_path": path,
+                    "read_count": data["count"],
                     "reads_per_sec": round(rps, 1),
                     "last_read": datetime.fromtimestamp(data["last"], tz=timezone.utc).isoformat(),
                     "cached": rps < 1,
@@ -309,6 +362,20 @@ data:
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(body)
+            elif self.path == "/metrics" and _METRICS_ENABLED:
+                entries = get_summary()
+                body = _format_metrics(entries, bpf is not None, WINDOW).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                self.send_header("Content-Length", len(body))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path in ("/", "/dashboard") and _DASHBOARD_HTML:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", len(_DASHBOARD_HTML))
+                self.end_headers()
+                self.wfile.write(_DASHBOARD_HTML)
             else:
                 self.send_error(404)
         def log_message(self, fmt, *args):
@@ -317,7 +384,7 @@ data:
     # --- Main ---
     bpf = None
     print("", file=sys.stderr)
-    print("  secrets-snitcher v0.2.0", file=sys.stderr)
+    print("  secrets-snitcher v0.4.0", file=sys.stderr)
     print("  eBPF-powered Kubernetes secret access monitor", file=sys.stderr)
     print("  By Michael Ridner — MIT License", file=sys.stderr)
     print("", file=sys.stderr)
@@ -347,6 +414,12 @@ data:
         t.start()
     except Exception as e:
         print(f"[ebpf] Not available: {e}", file=sys.stderr)
+    print("[api] GET /api/v1/secret-access", file=sys.stderr)
+    print("[api] GET /healthz", file=sys.stderr)
+    if _METRICS_ENABLED:
+        print("[api] GET /metrics (Prometheus)", file=sys.stderr)
+    if _DASHBOARD_HTML:
+        print("[api] GET /  (dashboard)", file=sys.stderr)
     print("[api] Listening on :9100", file=sys.stderr)
     print("[ready] Watching for secret access...", file=sys.stderr)
     HTTPServer(("0.0.0.0", 9100), Handler).serve_forever()
@@ -425,6 +498,333 @@ data:
 
         prev_pods = curr_pods
         time.sleep(2)
+  dashboard.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>secrets-snitcher</title>
+    <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    :root{
+      --bg:#0d1117;--card:#161b22;--border:#30363d;--divider:#21262d;
+      --text:#f0f6fc;--muted:#8b949e;
+      --green:#3fb950;--amber:#e3b341;--orange:#f0883e;--red:#f85149;
+      --blue:#79c0ff;--purple:#d2a8ff;
+    }
+    body{background:var(--bg);color:var(--text);font-family:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;font-size:13px;line-height:1.5}
+    a{color:var(--blue);text-decoration:none}
+    .container{max-width:1100px;margin:0 auto;padding:16px}
+    header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:12px}
+    .header-left{display:flex;align-items:center;gap:12px}
+    .header-left h1{font-size:16px;font-weight:600;color:var(--text)}
+    .header-left .subtitle{font-size:11px;color:var(--muted)}
+    .header-right{display:flex;align-items:center;gap:16px;font-size:12px}
+    .live-badge{display:flex;align-items:center;gap:6px;color:var(--green);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.5px}
+    .live-dot{width:8px;height:8px;background:var(--green);border-radius:50%;animation:live-pulse 2s ease-in-out infinite}
+    .disconnected .live-dot{background:var(--red);animation:none}
+    .disconnected .live-badge{color:var(--red)}
+    .clock{color:var(--muted);font-size:12px}
+    .buffer-select{background:var(--bg);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-family:inherit;font-size:11px;cursor:pointer}
+    .buffer-select:hover{border-color:var(--muted)}
+    .buffer-tip{position:relative;display:inline-block}
+    .buffer-tip .tip-text{visibility:hidden;background:var(--card);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:11px;position:absolute;z-index:10;top:28px;right:0;width:240px;white-space:normal;line-height:1.4}
+    .buffer-tip:hover .tip-text{visibility:visible}
+    .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+    .stat-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 16px;text-align:center}
+    .stat-card .label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px}
+    .stat-card .value{font-size:24px;font-weight:700}
+    .stat-card.anomaly .value{color:var(--red)}
+    .stat-card.anomaly.has-anomalies{animation:anomaly-pulse 2s ease-in-out infinite}
+    .stat-card.cached .value{color:var(--green)}
+    .stat-card.uncached .value{color:var(--amber)}
+    .stat-card.total .value{color:var(--blue)}
+    .flash{animation:value-flash 0.6s ease}
+    .anomaly-banner{background:rgba(248,81,73,0.1);border:1px solid var(--red);border-radius:8px;padding:10px 16px;margin-bottom:12px;color:var(--red);font-weight:600;font-size:12px;display:flex;align-items:center;gap:8px;max-height:0;overflow:hidden;opacity:0;transition:max-height 0.4s ease,opacity 0.3s ease,padding 0.3s ease,margin 0.3s ease;padding:0 16px;margin:0;border:none}
+    .anomaly-banner.visible{max-height:60px;opacity:1;padding:10px 16px;margin-bottom:12px;border:1px solid var(--red);animation:anomaly-pulse 2s ease-in-out infinite}
+    .anomaly-banner .icon{font-size:14px}
+    .timeline-section{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:12px}
+    .timeline-section .section-title{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px}
+    .timeline-canvas{width:100%;height:60px;display:block}
+    .bars-section{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:12px}
+    .bars-section .section-title{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px}
+    .bar-row{display:flex;align-items:center;gap:8px;margin-bottom:6px;height:22px}
+    .bar-label{width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--text);flex-shrink:0}
+    .bar-track{flex:1;height:16px;background:var(--bg);border-radius:3px;overflow:hidden}
+    .bar-fill{height:100%;border-radius:3px;transition:width 0.5s ease}
+    .bar-fill.cached{background:var(--green)}
+    .bar-fill.active{background:var(--amber)}
+    .bar-fill.anomaly{background:var(--red)}
+    .bar-value{width:80px;text-align:right;font-size:12px;flex-shrink:0}
+    .bar-value.anomaly{color:var(--red);font-weight:700}
+    .bar-value.cached{color:var(--green)}
+    .bar-value.active{color:var(--amber)}
+    .table-section{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:12px}
+    .table-section table{width:100%;border-collapse:collapse}
+    .table-section th{background:var(--bg);font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;padding:8px 12px;text-align:left;border-bottom:1px solid var(--border);font-weight:600}
+    .table-section td{padding:7px 12px;border-bottom:1px solid var(--divider);font-size:12px;white-space:nowrap}
+    .table-section tr:last-child td{border-bottom:none}
+    .table-section tr.anomaly-row{background:rgba(248,81,73,0.06)}
+    .table-section tr.anomaly-row td{color:var(--red)}
+    .table-section tr.cached-row td.status-cell{color:var(--green)}
+    .table-section tr.active-row td.status-cell{color:var(--amber)}
+    .table-section tr.fade-in{animation:row-fade-in 0.3s ease}
+    .badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600;letter-spacing:0.3px}
+    .badge.anomaly{background:rgba(248,81,73,0.15);color:var(--red)}
+    .badge.active{background:rgba(227,179,65,0.15);color:var(--amber)}
+    .badge.cached{background:rgba(63,185,80,0.15);color:var(--green)}
+    .sparkline-cell{width:80px}
+    .sparkline-cell canvas{display:block}
+    footer{text-align:center;padding:8px;font-size:11px;color:var(--muted)}
+    footer span{margin:0 8px}
+    .empty-state{text-align:center;padding:40px 20px;color:var(--muted)}
+    .empty-state .icon{font-size:32px;margin-bottom:12px;opacity:0.5}
+    .empty-state .msg{font-size:14px;margin-bottom:6px}
+    .empty-state .sub{font-size:11px}
+    @keyframes live-pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+    @keyframes anomaly-pulse{0%{box-shadow:0 0 0 0 rgba(248,81,73,0.3)}50%{box-shadow:0 0 16px 2px rgba(248,81,73,0.12)}100%{box-shadow:0 0 0 0 rgba(248,81,73,0.3)}}
+    @keyframes value-flash{0%{background:rgba(121,192,255,0.2)}100%{background:transparent}}
+    @keyframes row-fade-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+    </style>
+    </head>
+    <body>
+    <div class="container">
+      <header>
+        <div class="header-left">
+          <div>
+            <h1>secrets-snitcher</h1>
+            <div class="subtitle">eBPF kernel probe - secret access monitor</div>
+          </div>
+        </div>
+        <div class="header-right">
+          <div class="buffer-tip">
+            <select class="buffer-select" id="bufferSelect" title="Client-side history buffer">
+              <option value="300">Buffer: 5 min</option>
+              <option value="600" selected>Buffer: 10 min</option>
+              <option value="1800">Buffer: 30 min</option>
+              <option value="3600">Buffer: 1 hr</option>
+              <option value="0">Buffer: Unlimited</option>
+            </select>
+            <span class="tip-text">History is stored in browser memory. Larger buffers use more RAM. Data resets when you close the tab.</span>
+          </div>
+          <div class="live-badge" id="liveBadge">
+            <span class="live-dot"></span>
+            <span id="liveText">LIVE</span>
+          </div>
+          <div class="clock" id="clock">--:--:--</div>
+        </div>
+      </header>
+      <div class="stats">
+        <div class="stat-card total"><div class="label">Total Entries</div><div class="value" id="statTotal">0</div></div>
+        <div class="stat-card anomaly" id="statAnomalyCard"><div class="label">Anomalies</div><div class="value" id="statAnomalies">0</div></div>
+        <div class="stat-card cached"><div class="label">Cached</div><div class="value" id="statCached">0</div></div>
+        <div class="stat-card uncached"><div class="label">Uncached</div><div class="value" id="statUncached">0</div></div>
+      </div>
+      <div class="anomaly-banner" id="anomalyBanner">
+        <span class="icon">!</span>
+        <span id="anomalyText"></span>
+      </div>
+      <div class="timeline-section">
+        <div class="section-title">Anomaly Timeline</div>
+        <canvas class="timeline-canvas" id="timelineCanvas"></canvas>
+      </div>
+      <div class="bars-section">
+        <div class="section-title">Reads/sec by Pod</div>
+        <div id="barsContainer"></div>
+      </div>
+      <div class="table-section">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:28px"></th>
+              <th>Pod</th>
+              <th>Process</th>
+              <th>Secret Path</th>
+              <th>Reads/sec</th>
+              <th>Trend</th>
+              <th>First Seen</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+        <div class="empty-state" id="emptyState">
+          <div class="icon">~</div>
+          <div class="msg">No secret access detected</div>
+          <div class="sub">Watching sys_enter_openat for secret file reads</div>
+        </div>
+      </div>
+      <footer>
+        <span>tracing: sys_enter_openat</span>
+        <span>|</span>
+        <span>window: 60s</span>
+        <span>|</span>
+        <span>polling: 2s</span>
+        <span>|</span>
+        <span id="footerVersion">secrets-snitcher</span>
+      </footer>
+    </div>
+    <script>
+    (function() {
+      var POLL_MS = 2000;
+      var ANOMALY_THRESHOLD = 5;
+      var MAX_TABLE_ENTRIES = 50;
+      var prevEntries = {};
+      var historyBuffer = new Map;
+      var timelineHistory = [];
+      var firstSeenMap = {};
+      var connected = true;
+      var prevStats = {total:0, anomalies:0, cached:0, uncached:0};
+      var bufferSelect = document.getElementById('bufferSelect');
+      function getBufferSeconds() { return parseInt(bufferSelect.value, 10); }
+      function entryKey(e) { return e.pod + '::' + e.secret_path; }
+      function entryStatus(e) {
+        if (!e.cached && e.reads_per_sec > ANOMALY_THRESHOLD) return 'anomaly';
+        if (!e.cached) return 'active';
+        return 'cached';
+      }
+      function truncate(s, max) { return s.length > max ? s.slice(0, max - 2) + '..' : s; }
+      function shortPath(p) { var parts = p.split('/'); return parts.length > 2 ? '../' + parts.slice(-2).join('/') : p; }
+      function formatRps(v) { if (v >= 1000) return v.toFixed(0); if (v >= 10) return v.toFixed(1); return v.toFixed(2); }
+      function timeAgo(ts) { var d = Math.floor((Date.now() - ts) / 1000); if (d < 60) return d + 's ago'; if (d < 3600) return Math.floor(d / 60) + 'm ago'; return Math.floor(d / 3600) + 'h ago'; }
+      function nowUTC() { return new Date().toISOString().slice(11, 19) + ' UTC'; }
+      function updateClock() { document.getElementById('clock').textContent = nowUTC(); }
+      setInterval(updateClock, 1000); updateClock();
+      function setConnected(state) {
+        connected = state;
+        var badge = document.getElementById('liveBadge');
+        var text = document.getElementById('liveText');
+        if (state) { badge.classList.remove('disconnected'); text.textContent = 'LIVE'; }
+        else { badge.classList.add('disconnected'); text.textContent = 'DISCONNECTED'; }
+      }
+      function flashIfChanged(id, o, n) { if (o !== n) { var el = document.getElementById(id); el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); } }
+      function updateStats(entries) {
+        var total = entries.length;
+        var anomalies = entries.filter(function(e) { return entryStatus(e) === 'anomaly'; }).length;
+        var cached = entries.filter(function(e) { return e.cached; }).length;
+        var uncached = total - cached;
+        flashIfChanged('statTotal', prevStats.total, total);
+        flashIfChanged('statAnomalies', prevStats.anomalies, anomalies);
+        flashIfChanged('statCached', prevStats.cached, cached);
+        flashIfChanged('statUncached', prevStats.uncached, uncached);
+        document.getElementById('statTotal').textContent = total;
+        document.getElementById('statAnomalies').textContent = anomalies;
+        document.getElementById('statCached').textContent = cached;
+        document.getElementById('statUncached').textContent = uncached;
+        var card = document.getElementById('statAnomalyCard');
+        if (anomalies > 0) card.classList.add('has-anomalies'); else card.classList.remove('has-anomalies');
+        var banner = document.getElementById('anomalyBanner');
+        var bannerText = document.getElementById('anomalyText');
+        if (anomalies > 0) { bannerText.textContent = 'ANOMALY DETECTED - ' + anomalies + ' entr' + (anomalies === 1 ? 'y' : 'ies') + ' with reads/sec > ' + ANOMALY_THRESHOLD + ' (uncached)'; banner.classList.add('visible'); }
+        else { banner.classList.remove('visible'); }
+        prevStats = {total: total, anomalies: anomalies, cached: cached, uncached: uncached};
+      }
+      function recordHistory(entries) {
+        var now = Date.now(); var bufSec = getBufferSeconds(); var cutoff = bufSec > 0 ? now - (bufSec * 1000) : 0;
+        var anomalyCount = 0;
+        entries.forEach(function(e) {
+          var key = entryKey(e);
+          if (!historyBuffer.has(key)) historyBuffer.set(key, []);
+          historyBuffer.get(key).push({ts: now, rps: e.reads_per_sec, cached: e.cached});
+          if (!firstSeenMap[key]) firstSeenMap[key] = now;
+          if (entryStatus(e) === 'anomaly') anomalyCount++;
+        });
+        timelineHistory.push({ts: now, count: anomalyCount});
+        if (bufSec > 0) {
+          historyBuffer.forEach(function(arr, key) {
+            var pruned = arr.filter(function(p) { return p.ts >= cutoff; });
+            if (pruned.length === 0) { historyBuffer.delete(key); delete firstSeenMap[key]; }
+            else { historyBuffer.set(key, pruned); }
+          });
+          timelineHistory = timelineHistory.filter(function(p) { return p.ts >= cutoff; });
+        }
+      }
+      function drawTimeline() {
+        var canvas = document.getElementById('timelineCanvas');
+        var ctx = canvas.getContext('2d');
+        var dpr = window.devicePixelRatio || 1;
+        var rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
+        ctx.scale(dpr, dpr); var w = rect.width; var h = rect.height;
+        ctx.clearRect(0, 0, w, h);
+        if (timelineHistory.length < 2) { ctx.fillStyle = '#8b949e'; ctx.font = '11px monospace'; ctx.textAlign = 'center'; ctx.fillText('Collecting data...', w / 2, h / 2 + 4); return; }
+        var maxCount = Math.max(1, Math.max.apply(null, timelineHistory.map(function(p) { return p.count; })));
+        var tMin = timelineHistory[0].ts; var tMax = timelineHistory[timelineHistory.length - 1].ts; var tRange = Math.max(tMax - tMin, 1);
+        ctx.beginPath(); ctx.moveTo(0, h);
+        for (var i = 0; i < timelineHistory.length; i++) { var x = ((timelineHistory[i].ts - tMin) / tRange) * w; var y = h - (timelineHistory[i].count / maxCount) * (h - 8); ctx.lineTo(x, y); }
+        ctx.lineTo(w, h); ctx.closePath(); ctx.fillStyle = 'rgba(248, 81, 73, 0.12)'; ctx.fill();
+        ctx.beginPath();
+        for (var i = 0; i < timelineHistory.length; i++) { var x = ((timelineHistory[i].ts - tMin) / tRange) * w; var y = h - (timelineHistory[i].count / maxCount) * (h - 8); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+        ctx.strokeStyle = '#f85149'; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.fillStyle = '#8b949e'; ctx.font = '10px monospace'; ctx.textAlign = 'left';
+        ctx.fillText(maxCount + ' anomal' + (maxCount === 1 ? 'y' : 'ies'), 4, 12);
+        var bufSec = getBufferSeconds();
+        var label = bufSec > 0 ? Math.round(bufSec / 60) + 'm ago' : Math.round(tRange / 60000) + 'm ago';
+        ctx.fillText(label, 4, h - 4); ctx.textAlign = 'right'; ctx.fillText('now', w - 4, h - 4);
+      }
+      function drawSparkline(canvas, dataPoints) {
+        var ctx = canvas.getContext('2d'); var dpr = window.devicePixelRatio || 1;
+        canvas.width = 80 * dpr; canvas.height = 20 * dpr; canvas.style.width = '80px'; canvas.style.height = '20px';
+        ctx.scale(dpr, dpr); ctx.clearRect(0, 0, 80, 20);
+        if (!dataPoints || dataPoints.length < 2) return;
+        var maxRps = Math.max.apply(null, dataPoints.map(function(p) { return p.rps; }));
+        if (maxRps === 0) maxRps = 1;
+        ctx.beginPath();
+        for (var i = 0; i < dataPoints.length; i++) { var x = (i / (dataPoints.length - 1)) * 78 + 1; var y = 19 - (dataPoints[i].rps / maxRps) * 17; if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+        var lp = dataPoints[dataPoints.length - 1];
+        var st = (!lp.cached && lp.rps > ANOMALY_THRESHOLD) ? 'anomaly' : (!lp.cached ? 'active' : 'cached');
+        ctx.strokeStyle = st === 'anomaly' ? '#f85149' : st === 'active' ? '#e3b341' : '#3fb950';
+        ctx.lineWidth = 1.2; ctx.stroke();
+      }
+      function updateBars(entries) {
+        var container = document.getElementById('barsContainer');
+        var sorted = entries.slice().sort(function(a, b) { return b.reads_per_sec - a.reads_per_sec; });
+        var top = sorted.slice(0, 10); var maxRps = top.length > 0 ? top[0].reads_per_sec : 1;
+        var logMax = Math.log10(maxRps + 1); if (logMax === 0) logMax = 1;
+        var html = '';
+        top.forEach(function(e) {
+          var status = entryStatus(e);
+          var pct = (Math.log10(e.reads_per_sec + 1) / logMax * 100).toFixed(1);
+          html += '<div class="bar-row"><span class="bar-label">' + truncate(e.pod, 28) + '</span><div class="bar-track"><div class="bar-fill ' + status + '" style="width:' + pct + '%"></div></div><span class="bar-value ' + status + '">' + formatRps(e.reads_per_sec) + '</span></div>';
+        });
+        container.innerHTML = html;
+      }
+      function updateTable(entries) {
+        var tbody = document.getElementById('tableBody'); var empty = document.getElementById('emptyState');
+        var sorted = entries.slice().sort(function(a, b) { return b.reads_per_sec - a.reads_per_sec; });
+        var top = sorted.slice(0, MAX_TABLE_ENTRIES);
+        if (top.length === 0) { tbody.innerHTML = ''; empty.style.display = 'block'; return; }
+        empty.style.display = 'none';
+        var newKeys = {}; var html = '';
+        top.forEach(function(e) {
+          var key = entryKey(e); var status = entryStatus(e); var isNew = !prevEntries[key]; newKeys[key] = true;
+          var rowClass = status === 'anomaly' ? 'anomaly-row' : status === 'cached' ? 'cached-row' : 'active-row';
+          if (isNew) rowClass += ' fade-in';
+          var indicator = status === 'anomaly' ? '<span style="color:var(--red);font-weight:700">!</span>' : '';
+          var badgeText = status === 'anomaly' ? 'ANOMALY' : status === 'active' ? 'ACTIVE' : 'CACHED';
+          var seen = firstSeenMap[key] ? timeAgo(firstSeenMap[key]) : '-';
+          html += '<tr class="' + rowClass + '" data-key="' + key + '"><td>' + indicator + '</td><td>' + truncate(e.pod, 32) + '</td><td>' + truncate(e.container, 16) + '</td><td>' + shortPath(e.secret_path) + '</td><td>' + formatRps(e.reads_per_sec) + '</td><td class="sparkline-cell"><canvas class="sparkline" data-key="' + key + '"></canvas></td><td>' + seen + '</td><td class="status-cell"><span class="badge ' + status + '">' + badgeText + '</span></td></tr>';
+        });
+        tbody.innerHTML = html;
+        tbody.querySelectorAll('canvas.sparkline').forEach(function(c) { drawSparkline(c, historyBuffer.get(c.getAttribute('data-key')) || []); });
+        prevEntries = newKeys;
+      }
+      function poll() {
+        fetch('/api/v1/secret-access').then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(function(data) { setConnected(true); handleData(data); })
+        .catch(function() { setConnected(false); });
+      }
+      function handleData(data) {
+        var entries = data.entries || [];
+        recordHistory(entries); updateStats(entries); updateBars(entries); updateTable(entries); drawTimeline();
+      }
+      window.addEventListener('resize', drawTimeline);
+      drawTimeline(); poll(); setInterval(poll, POLL_MS);
+    })();
+    </script>
+    </body>
+    </html>
 ---
 apiVersion: v1
 kind: Pod
@@ -448,6 +848,11 @@ spec:
           apt-get install -y -qq linux-headers-$(uname -r) > /dev/null 2>&1 || true
           echo "[install] Dependencies ready"
           python3 /code/api.py
+      env:
+        - name: SNITCHER_METRICS_ENABLED
+          value: "true"
+        - name: SNITCHER_DASHBOARD_ENABLED
+          value: "true"
       ports:
         - containerPort: 9100
           name: http

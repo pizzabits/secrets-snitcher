@@ -10,11 +10,14 @@ Usage:
 """
 
 import json
+import os
 import random
 import signal
 import sys
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 # Simulates a real cluster with mixed workloads
 REALISTIC_ENTRIES = [
@@ -78,6 +81,57 @@ REALISTIC_ENTRIES = [
 
 _malicious_deployed = False
 
+# Feature toggles
+_METRICS_ENABLED = os.environ.get("SNITCHER_METRICS_ENABLED", "true").lower() != "false"
+_DASHBOARD_ENABLED = os.environ.get("SNITCHER_DASHBOARD_ENABLED", "true").lower() != "false"
+
+# Load dashboard HTML
+_DASHBOARD_HTML = None
+if _DASHBOARD_ENABLED:
+    _dashboard_path = Path(__file__).resolve().parent.parent / "agent" / "dashboard.html"
+    if _dashboard_path.exists():
+        _DASHBOARD_HTML = _dashboard_path.read_bytes()
+
+
+def _prom_escape(v):
+    return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _format_metrics(entries, ebpf_attached, window_seconds):
+    lines = [
+        "# HELP snitcher_ebpf_attached Whether the eBPF probe is loaded in the kernel.",
+        "# TYPE snitcher_ebpf_attached gauge",
+        f"snitcher_ebpf_attached {1 if ebpf_attached else 0}",
+        "# HELP snitcher_observation_window_seconds Rolling observation window length.",
+        "# TYPE snitcher_observation_window_seconds gauge",
+        f"snitcher_observation_window_seconds {window_seconds}",
+        "# HELP snitcher_tracked_secrets Number of active pod/secret combinations being tracked.",
+        "# TYPE snitcher_tracked_secrets gauge",
+        f"snitcher_tracked_secrets {len(entries)}",
+        "# HELP snitcher_secret_reads_per_second Current read rate over the observation window.",
+        "# TYPE snitcher_secret_reads_per_second gauge",
+        "# HELP snitcher_secret_reads_total Reads observed in the current window.",
+        "# TYPE snitcher_secret_reads_total gauge",
+        "# HELP snitcher_secret_cached Whether the secret appears to be cached in memory.",
+        "# TYPE snitcher_secret_cached gauge",
+        "# HELP snitcher_secret_last_read_timestamp_seconds Unix timestamp of the most recent read.",
+        "# TYPE snitcher_secret_last_read_timestamp_seconds gauge",
+    ]
+    for e in entries:
+        labels = (
+            f'{{pod="{_prom_escape(e["pod"])}",'
+            f'container="{_prom_escape(e["container"])}",'
+            f'secret_path="{_prom_escape(e["secret_path"])}"}}'
+        )
+        lines.append(f"snitcher_secret_reads_per_second{labels} {e['reads_per_sec']}")
+        lines.append(f"snitcher_secret_reads_total{labels} {e.get('read_count', 0)}")
+        lines.append(f"snitcher_secret_cached{labels} {1 if e['cached'] else 0}")
+        last_str = e["last_read"].replace("Z", "+00:00")
+        last_ts = datetime.fromisoformat(last_str).timestamp()
+        lines.append(f"snitcher_secret_last_read_timestamp_seconds{labels} {last_ts:.3f}")
+    lines.append("")
+    return "\n".join(lines)
+
 
 def _now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -119,6 +173,30 @@ class Handler(BaseHTTPRequestHandler):
             self._json(resp)
         elif self.path == "/healthz":
             self._json({"status": "ok", "ebpf_attached": True})
+        elif self.path == "/metrics" and _METRICS_ENABLED:
+            now = _now()
+            if _malicious_deployed:
+                entries = []
+                for e in REALISTIC_ENTRIES:
+                    entry = e.copy()
+                    entry["reads_per_sec"] = _jitter(e["reads_per_sec"])
+                    entry["last_read"] = now
+                    entry["read_count"] = int(entry["reads_per_sec"] * 60)
+                    entries.append(entry)
+            else:
+                entries = []
+            body = _format_metrics(entries, True, 60).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path in ("/", "/dashboard") and _DASHBOARD_HTML:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", len(_DASHBOARD_HTML))
+            self.end_headers()
+            self.wfile.write(_DASHBOARD_HTML)
         elif self.path == "/toggle":
             _malicious_deployed = not _malicious_deployed
             state = "ON - returning realistic cluster data" if _malicious_deployed else "OFF - returning empty"
@@ -151,11 +229,15 @@ if __name__ == "__main__":
     print("  GET /api/v1/secret-access  - returns empty until toggled")
     print("  GET /healthz               - health check")
     print("  GET /toggle                - switch between empty/realistic responses")
+    if _METRICS_ENABLED:
+        print("  GET /metrics               - Prometheus metrics")
+    if _DASHBOARD_HTML:
+        print("  GET /                      - web dashboard")
     print()
     print("Demo flow:")
-    print("  1. ./secrets-snitcher-tui                       (empty, watching)")
+    print("  1. Open http://localhost:9100 in browser         (dashboard)")
     print("  2. curl localhost:9100/toggle                    (simulate cluster)")
-    print("  3. TUI shows mixed cached/active/anomaly entries")
+    print("  3. Dashboard shows mixed cached/active/anomaly entries")
     print()
     print("Ctrl+C to stop.")
 

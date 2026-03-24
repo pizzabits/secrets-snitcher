@@ -11,7 +11,9 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 
-from flask import Flask, jsonify
+from pathlib import Path
+
+from flask import Flask, Response, jsonify
 
 from agent.aggregator import SecretAccessAggregator
 
@@ -22,7 +24,7 @@ _TELEMETRY_BOOT_FILE = "/tmp/secrets_snitcher_boot_time"
 _TELEMETRY_ID_FILE = "/tmp/secrets_snitcher_id"
 _TELEMETRY_DEDUP_SECONDS = 86400
 _TELEMETRY_TIMEOUT = 3
-_VERSION = "0.2.0"
+_VERSION = "0.4.0"
 
 
 def _get_install_id():
@@ -162,6 +164,60 @@ def _send_telemetry():
     t = threading.Thread(target=_do_send, daemon=True)
     t.start()
 
+# --- Feature toggles ---
+_METRICS_ENABLED = os.environ.get("SNITCHER_METRICS_ENABLED", "true").lower() != "false"
+_DASHBOARD_ENABLED = os.environ.get("SNITCHER_DASHBOARD_ENABLED", "true").lower() != "false"
+
+
+# --- Prometheus metrics ---
+def _prom_escape(v):
+    return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _format_metrics(entries, ebpf_attached, window_seconds):
+    lines = [
+        "# HELP snitcher_ebpf_attached Whether the eBPF probe is loaded in the kernel.",
+        "# TYPE snitcher_ebpf_attached gauge",
+        f"snitcher_ebpf_attached {1 if ebpf_attached else 0}",
+        "# HELP snitcher_observation_window_seconds Rolling observation window length.",
+        "# TYPE snitcher_observation_window_seconds gauge",
+        f"snitcher_observation_window_seconds {window_seconds}",
+        "# HELP snitcher_tracked_secrets Number of active pod/secret combinations being tracked.",
+        "# TYPE snitcher_tracked_secrets gauge",
+        f"snitcher_tracked_secrets {len(entries)}",
+        "# HELP snitcher_secret_reads_per_second Current read rate over the observation window.",
+        "# TYPE snitcher_secret_reads_per_second gauge",
+        "# HELP snitcher_secret_reads_total Reads observed in the current window.",
+        "# TYPE snitcher_secret_reads_total gauge",
+        "# HELP snitcher_secret_cached Whether the secret appears to be cached in memory.",
+        "# TYPE snitcher_secret_cached gauge",
+        "# HELP snitcher_secret_last_read_timestamp_seconds Unix timestamp of the most recent read.",
+        "# TYPE snitcher_secret_last_read_timestamp_seconds gauge",
+    ]
+    for e in entries:
+        labels = (
+            f'{{pod="{_prom_escape(e["pod"])}",'
+            f'container="{_prom_escape(e["container"])}",'
+            f'secret_path="{_prom_escape(e["secret_path"])}"}}'
+        )
+        lines.append(f"snitcher_secret_reads_per_second{labels} {e['reads_per_sec']}")
+        lines.append(f"snitcher_secret_reads_total{labels} {e.get('read_count', 0)}")
+        lines.append(f"snitcher_secret_cached{labels} {1 if e['cached'] else 0}")
+        last_str = e["last_read"].replace("Z", "+00:00")
+        last_ts = datetime.fromisoformat(last_str).timestamp()
+        lines.append(f"snitcher_secret_last_read_timestamp_seconds{labels} {last_ts:.3f}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+# --- Dashboard ---
+_DASHBOARD_HTML = None
+if _DASHBOARD_ENABLED:
+    _dashboard_path = Path(__file__).parent / "dashboard.html"
+    if _dashboard_path.exists():
+        _DASHBOARD_HTML = _dashboard_path.read_bytes()
+
+
 app = Flask(__name__)
 aggregator = SecretAccessAggregator()
 probe = None
@@ -184,6 +240,24 @@ def healthz():
     })
 
 
+if _METRICS_ENABLED:
+    @app.route("/metrics")
+    def metrics():
+        entries = aggregator.get_summary()
+        body = _format_metrics(
+            entries,
+            ebpf_attached=probe.attached if probe else False,
+            window_seconds=aggregator.WINDOW_SECONDS,
+        )
+        return Response(body, mimetype="text/plain; version=0.0.4; charset=utf-8")
+
+
+if _DASHBOARD_ENABLED and _DASHBOARD_HTML:
+    @app.route("/")
+    def dashboard():
+        return Response(_DASHBOARD_HTML, mimetype="text/html; charset=utf-8")
+
+
 def main():
     global probe
 
@@ -192,7 +266,7 @@ def main():
         from agent.probe import SecretAccessProbe
 
         print("", file=sys.stderr)
-        print("  secrets-snitcher v0.2.0", file=sys.stderr)
+        print("  secrets-snitcher v0.4.0", file=sys.stderr)
         print("  eBPF-powered Kubernetes secret access monitor", file=sys.stderr)
         print("", file=sys.stderr)
         _send_telemetry()
@@ -212,6 +286,10 @@ def main():
         print("", file=sys.stderr)
         print("[api] GET /api/v1/secret-access", file=sys.stderr)
         print("[api] GET /healthz", file=sys.stderr)
+        if _METRICS_ENABLED:
+            print("[api] GET /metrics (Prometheus)", file=sys.stderr)
+        if _DASHBOARD_ENABLED and _DASHBOARD_HTML:
+            print("[api] GET /  (dashboard)", file=sys.stderr)
         print("", file=sys.stderr)
         print("[ready] Watching for secret access...", file=sys.stderr)
     except Exception as e:

@@ -51,6 +51,7 @@ class SecretAccessAggregator:
                     "pod": self._resolve_pod_name(pid),
                     "container": comm,
                     "secret_path": filepath,
+                    "read_count": len(recent),
                     "reads_per_sec": round(reads_per_sec, 2),
                     "last_read": last_read_dt.isoformat(),
                     "cached": reads_per_sec < 1,

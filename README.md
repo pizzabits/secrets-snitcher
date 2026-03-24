@@ -6,7 +6,7 @@ eBPF-powered Kubernetes secret access monitor.
 
 Watches which pods read secret files, how often, and whether they cache values in memory or re-read from disk on every request. Catches suspicious access patterns like a compromised pod hammering service account tokens.
 
-> **NEW** - [Interactive TUI dashboard](#terminal-ui-tui) for live secret access monitoring with anomaly detection, color-coded read rates, and vim-style navigation.
+> **NEW** - [Web dashboard](#web-dashboard) with live anomaly timeline, sparklines, and per-pod bar charts. [Prometheus /metrics](#prometheus-metrics) endpoint for Grafana integration. [Interactive TUI](#terminal-ui-tui) for terminal-native monitoring.
 
 ## How it works
 
@@ -160,6 +160,75 @@ Features: anomaly detection banner, color-coded read rates, NEW pod badges, vim-
 
 See [cmd/tui/README.md](cmd/tui/README.md) for full keyboard shortcuts and options, and [cmd/tui/DEVGUIDE.md](cmd/tui/DEVGUIDE.md) for an architecture walkthrough aimed at C/C++ developers.
 
+## Web Dashboard
+
+An embedded web dashboard served directly from the snitcher pod - no extra dependencies, no CDN, no build step.
+
+```bash
+# With port-forward active, open in browser:
+open http://localhost:9100
+
+# Or try with the mock API:
+python3 demo/mock-api.py    # Terminal 1
+curl localhost:9100/toggle   # Terminal 2 (enable mock data)
+open http://localhost:9100   # Browser
+```
+
+Features:
+- Dark theme with color-coded anomaly/active/cached status
+- Anomaly timeline chart (built from client-side history buffer)
+- Per-pod horizontal bar chart with log-scale reads/sec
+- Per-entry sparklines showing read rate trends
+- Configurable client-side history buffer (5min - unlimited)
+- Live updating every 2 seconds with connection status indicator
+- Pulsing anomaly banner when suspicious access is detected
+
+The dashboard stores history in browser memory while the tab is open. Use the buffer dropdown to control retention. Data resets when you close the tab.
+
+To disable: set `SNITCHER_DASHBOARD_ENABLED=false`.
+
+## Prometheus Metrics
+
+A `/metrics` endpoint exposes secret access data in Prometheus text format for Grafana integration.
+
+```bash
+curl http://localhost:9100/metrics
+```
+
+```
+# HELP snitcher_secret_reads_per_second Current read rate over the observation window.
+# TYPE snitcher_secret_reads_per_second gauge
+snitcher_secret_reads_per_second{pod="totally-legit-app",container="sh",secret_path="/var/run/secrets/kubernetes.io/serviceaccount/token"} 4872.3
+```
+
+Exposed metrics:
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `snitcher_secret_reads_per_second` | gauge | pod, container, secret_path |
+| `snitcher_secret_reads_total` | gauge | pod, container, secret_path |
+| `snitcher_secret_cached` | gauge | pod, container, secret_path |
+| `snitcher_secret_last_read_timestamp_seconds` | gauge | pod, container, secret_path |
+| `snitcher_observation_window_seconds` | gauge | - |
+| `snitcher_tracked_secrets` | gauge | - |
+| `snitcher_ebpf_attached` | gauge | - |
+
+Prometheus scrapes these gauges every 15-30 seconds and stores them in its own time-series database, giving you full historical data in Grafana even though secrets-snitcher only keeps a 60-second rolling window in memory.
+
+To disable: set `SNITCHER_METRICS_ENABLED=false`.
+
+## Configuration
+
+Both the dashboard and metrics endpoint are enabled by default and can be independently toggled via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SNITCHER_DASHBOARD_ENABLED` | `true` | Serve web dashboard at `/` |
+| `SNITCHER_METRICS_ENABLED` | `true` | Serve Prometheus metrics at `/metrics` |
+| `SECRETS_SNITCHER_NO_TELEMETRY` | unset | Set to `1` to disable anonymous telemetry |
+
+Set these in the pod spec or pass as environment variables when running standalone.
+
 ## Makefile targets
 
 ```bash
@@ -201,7 +270,8 @@ Requires privileged containers (`CAP_BPF` + `CAP_SYS_ADMIN` + `hostPID: true`).
 k8s/pod-inline.yaml
 ├── ConfigMap (secrets-snitcher-code)
 │   ├── api.py          # All-in-one: BPF loader + aggregator + HTTP server
-│   └── live.py         # Terminal UI (port-forward + curses-style refresh)
+│   ├── live.py         # Terminal monitor (port-forward + curses-style refresh)
+│   └── dashboard.html  # Embedded web dashboard (single-file, no dependencies)
 ├── Pod (privileged, hostPID: true)
 │   ├── mounts /proc as /host-proc (read-only, for pod name resolution)
 │   ├── mounts /sys/kernel/debug (required by BCC)
@@ -247,7 +317,7 @@ This is a solo open source project. Telemetry is the only way to know if anyone 
 | Field | Example | Why |
 |-------|---------|-----|
 | tool | secrets-snitcher | Which tool sent the ping |
-| version | 0.2.0 | Know which versions are in the wild |
+| version | 0.4.0 | Know which versions are in the wild |
 | kernel | 6.17.0-1008-gcp | Know which kernel offsets to support |
 | arch | x86_64 | Know if ARM support matters |
 | python | 3.10.12 | Know minimum Python version to target |
