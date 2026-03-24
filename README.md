@@ -1,6 +1,12 @@
 # secrets-snitcher
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<p align="center">
+  <img src="https://img.shields.io/badge/eBPF-kernel_probe-3fb950?style=flat-square&logo=linux&logoColor=white" alt="eBPF">
+  <img src="https://img.shields.io/badge/Kubernetes-secret_monitor-326ce5?style=flat-square&logo=kubernetes&logoColor=white" alt="Kubernetes">
+  <img src="https://img.shields.io/badge/Prometheus-metrics-e6522c?style=flat-square&logo=prometheus&logoColor=white" alt="Prometheus">
+  <img src="https://img.shields.io/badge/v0.4.0-latest-79c0ff?style=flat-square" alt="v0.4.0">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-8b949e?style=flat-square" alt="MIT"></a>
+</p>
 
 eBPF-powered Kubernetes secret access monitor.
 
